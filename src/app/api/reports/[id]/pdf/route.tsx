@@ -49,12 +49,20 @@ const styles = StyleSheet.create({
   timeline: { marginTop: 8 },
 });
 
-export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+export async function GET(
+  _req: NextRequest,
+  ctx: { params: Promise<{ id: string }> }
+) {
   const { id } = await ctx.params;
   const db = await getDb();
 
-  const interview = await db.collection("interviews").findOne({ _id: new ObjectId(id) });
-  if (!interview) return NextResponse.json({ error: "not found" }, { status: 404 });
+  const interview = await db
+    .collection("interviews")
+    .findOne({ _id: new ObjectId(id) });
+
+  if (!interview) {
+    return NextResponse.json({ error: "not found" }, { status: 404 });
+  }
 
   const events: EventRow[] = await fetchEventsByInterview(db, id);
   const counts = summarizeCounts(events);
@@ -65,10 +73,12 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string
     events
   );
 
-  await db.collection("interviews").updateOne(
-    { _id: new ObjectId(id) },
-    { $set: { integrityScore: integrity.score } }
-  );
+  await db
+    .collection("interviews")
+    .updateOne(
+      { _id: new ObjectId(id) },
+      { $set: { integrityScore: integrity.score } }
+    );
 
   const phoneDetected = (counts["PHONE_DETECTED"] ?? 0) > 0;
   const multipleFaces = (counts["MULTIPLE_FACES"] ?? 0) > 0;
@@ -79,17 +89,32 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string
         <Text style={styles.h1}>Interview Integrity Report</Text>
 
         <View style={styles.meta}>
-          <View style={styles.row}><Text>Interview ID</Text><Text style={styles.mono}>{id}</Text></View>
+          <View style={styles.row}>
+            <Text>Interview ID</Text>
+            <Text style={styles.mono}>{id}</Text>
+          </View>
           {interview.candidateName && (
-            <View style={styles.row}><Text>Candidate</Text><Text>{String(interview.candidateName)}</Text></View>
+            <View style={styles.row}>
+              <Text>Candidate</Text>
+              <Text>{String(interview.candidateName)}</Text>
+            </View>
           )}
           {interview.startedAt && (
-            <View style={styles.row}><Text>Started</Text><Text>{String(interview.startedAt)}</Text></View>
+            <View style={styles.row}>
+              <Text>Started</Text>
+              <Text>{String(interview.startedAt)}</Text>
+            </View>
           )}
           {interview.endedAt && (
-            <View style={styles.row}><Text>Ended</Text><Text>{String(interview.endedAt)}</Text></View>
+            <View style={styles.row}>
+              <Text>Ended</Text>
+              <Text>{String(interview.endedAt)}</Text>
+            </View>
           )}
-          <View style={styles.row}><Text>Duration</Text><Text>{msToHMS(durationMs)}</Text></View>
+          <View style={styles.row}>
+            <Text>Duration</Text>
+            <Text>{msToHMS(durationMs)}</Text>
+          </View>
         </View>
 
         <View style={styles.scoreWrap}>
@@ -122,12 +147,18 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string
         </View>
 
         <View style={styles.timeline}>
-          <Text style={{ fontWeight: 700, marginBottom: 4 }}>Timeline (first 50)</Text>
+          <Text style={{ fontWeight: 700, marginBottom: 4 }}>
+            Timeline (first 50)
+          </Text>
           {events.slice(0, 50).map((e, i) => (
             <View key={i} style={styles.row}>
               <Text style={styles.mono}>{(e.t / 1000).toFixed(1)}s</Text>
               <Text>{e.type}</Text>
-              <Text>{typeof e.confidence === "number" ? `conf ${e.confidence.toFixed(2)}` : ""}</Text>
+              <Text>
+                {typeof e.confidence === "number"
+                  ? `conf ${e.confidence.toFixed(2)}`
+                  : ""}
+              </Text>
             </View>
           ))}
         </View>
@@ -135,21 +166,18 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string
     </PDFDocument>
   );
 
-  // --- Return raw ArrayBuffer (no streams, no Blob) ---
-  // build your <PDFDocument> as Doc above...
+  // Get raw bytes from react-pdf. In Node this resolves to a Buffer,
+  // which is a Uint8Array subclass. We copy into a fresh Uint8Array
+  // so its .buffer is an ArrayBuffer (not ArrayBufferLike), then return that.
+  const raw = (await pdf(Doc).toBuffer()) as unknown as Uint8Array;
+  const u8 = new Uint8Array(raw);         // ensure offset 0 / ArrayBuffer type
+  const ab: ArrayBuffer = u8.buffer;      // clean ArrayBuffer for BodyInit
 
-// Get raw bytes (no streams)
-const bytes: Uint8Array = await (pdf(Doc).toBuffer() as unknown as Promise<Uint8Array>);
-
-// Wrap in a Blob so BodyInit is unambiguous for TS
-const blob = new Blob([bytes], { type: "application/pdf" });
-
-return new NextResponse(blob, {
-  headers: {
-    "Content-Type": "application/pdf",
-    "Content-Disposition": `inline; filename="report-${id}.pdf"`,
-    "Cache-Control": "no-store",
-  },
-});
-
+  return new NextResponse(ab, {
+    headers: {
+      "Content-Type": "application/pdf",
+      "Content-Disposition": `inline; filename="report-${id}.pdf"`,
+      "Cache-Control": "no-store",
+    },
+  });
 }
