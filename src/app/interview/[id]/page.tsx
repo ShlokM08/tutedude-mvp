@@ -1,56 +1,43 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
+import type { EventType, ProctorEventInput } from "@/lib/types";
 
-/* ---- helpers ---- */
+/* ---------- helpers ---------- */
 const MIME_CANDIDATES = [
   "video/webm;codecs=vp9,opus",
   "video/webm;codecs=vp8,opus",
   "video/webm",
 ];
+
 function pickSupportedMime(): string | undefined {
+  if (typeof MediaRecorder === "undefined") return undefined;
   for (const mt of MIME_CANDIDATES) {
-    // @ts-ignore
-    if (window.MediaRecorder && MediaRecorder.isTypeSupported(mt)) return mt;
+    if (MediaRecorder.isTypeSupported(mt)) return mt;
   }
   return undefined;
 }
-
-type EventType =
-  | "FOCUS_LOST_5S"
-  | "NO_FACE_10S"
-  | "MULTIPLE_FACES"
-  | "PHONE_DETECTED"
-  | "BOOK_DETECTED"
-  | "EXTRA_DEVICE";
-
-type ProctorEventInput = {
-  interviewId: string;
-  t: number;
-  type: EventType;
-  confidence?: number;
-  meta?: Record<string, any>;
-  createdAt?: string;
-};
 
 export default function InterviewPage() {
   const { id: interviewId } = useParams<{ id: string }>();
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const [recording, setRecording] = useState(false);
-  const [elapsed, setElapsed] = useState(0);
   const startTsRef = useRef<number | null>(null);
 
+  const [recording, setRecording] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
   const [err, setErr] = useState<string | null>(null);
+
   const [cams, setCams] = useState<MediaDeviceInfo[]>([]);
   const [mics, setMics] = useState<MediaDeviceInfo[]>([]);
   const [camId, setCamId] = useState<string>("");
   const [micId, setMicId] = useState<string>("");
 
+  // in-memory event buffer
   const bufferRef = useRef<ProctorEventInput[]>([]);
 
-  /* flush events every 3s */
+  // flush events every 3s
   useEffect(() => {
     const iv = setInterval(async () => {
       if (!bufferRef.current.length) return;
@@ -68,7 +55,7 @@ export default function InterviewPage() {
     return () => clearInterval(iv);
   }, [interviewId]);
 
-  function pushEvent(type: EventType, confidence?: number, meta?: Record<string, any>) {
+  function pushEvent(type: EventType, confidence?: number, meta?: Record<string, unknown>) {
     const now = Date.now();
     const start = startTsRef.current ?? now;
     bufferRef.current.push({
@@ -81,48 +68,35 @@ export default function InterviewPage() {
     });
   }
 
-  /* enumerate devices (will show labels after first permission) */
-  async function refreshDevices() {
+  const refreshDevices = useCallback(async () => {
     try {
       const list = await navigator.mediaDevices.enumerateDevices();
-      const cams = list.filter((d) => d.kind === "videoinput");
-      const mics = list.filter((d) => d.kind === "audioinput");
-      setCams(cams);
-      setMics(mics);
-      if (!camId && cams[0]) setCamId(cams[0].deviceId);
-      if (!micId && mics[0]) setMicId(mics[0].deviceId);
+      const camList = list.filter((d) => d.kind === "videoinput");
+      const micList = list.filter((d) => d.kind === "audioinput");
+      setCams(camList);
+      setMics(micList);
+      if (!camId && camList[0]) setCamId(camList[0].deviceId);
+      if (!micId && micList[0]) setMicId(micList[0].deviceId);
     } catch {
-      /* ignore */
+      // ignore
     }
-  }
+  }, [camId, micId]);
+
   useEffect(() => {
     refreshDevices();
     navigator.mediaDevices.addEventListener?.("devicechange", refreshDevices);
     return () => navigator.mediaDevices.removeEventListener?.("devicechange", refreshDevices);
-  }, []);
+  }, [refreshDevices]);
 
   useEffect(() => {
-    let t: any;
+    let t: ReturnType<typeof setInterval> | undefined;
     if (recording) t = setInterval(() => setElapsed((p) => p + 1), 1000);
-    return () => clearInterval(t);
+    return () => { if (t) clearInterval(t); };
   }, [recording]);
 
   async function start() {
     setErr(null);
 
-    // check permission hints
-    try {
-      // @ts-ignore
-      const camPerm = await navigator.permissions?.query?.({ name: "camera" as PermissionName });
-      // @ts-ignore
-      const micPerm = await navigator.permissions?.query?.({ name: "microphone" as PermissionName });
-      if (camPerm?.state === "denied" || micPerm?.state === "denied") {
-        setErr("Camera/microphone permission is blocked. Click the camera icon in the address bar and set both to Allow for localhost.");
-        return;
-      }
-    } catch { /* ignore */ }
-
-    // constraints: prefer selected devices
     const constraints: MediaStreamConstraints = {
       video: camId ? { deviceId: { exact: camId }, width: { ideal: 1280 }, height: { ideal: 720 } } : { width: { ideal: 1280 }, height: { ideal: 720 } },
       audio: micId ? { deviceId: { exact: micId }, echoCancellation: true, noiseSuppression: true } : true,
@@ -131,8 +105,8 @@ export default function InterviewPage() {
     let stream: MediaStream;
     try {
       stream = await navigator.mediaDevices.getUserMedia(constraints);
-    } catch (e: any) {
-      const name = e?.name || "Error";
+    } catch (e: unknown) {
+      const name = (e as { name?: string })?.name ?? "Error";
       if (name === "NotAllowedError") setErr("Permission denied. Allow camera & microphone for this site.");
       else if (name === "NotFoundError") setErr("No camera/microphone found. Pick a different device from the dropdowns.");
       else if (name === "NotReadableError") setErr("Camera is busy in another app (Zoom/Teams/etc.). Close it and retry.");
@@ -142,7 +116,7 @@ export default function InterviewPage() {
 
     if (!videoRef.current) return;
     videoRef.current.srcObject = stream;
-    try { await videoRef.current.play(); } catch {}
+    try { await videoRef.current.play(); } catch { /* autoplay quirks */ }
 
     const mimeType = pickSupportedMime();
     if (!mimeType) {
@@ -152,7 +126,7 @@ export default function InterviewPage() {
 
     const rec = new MediaRecorder(stream, { mimeType });
     const chunks: BlobPart[] = [];
-    rec.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+    rec.ondataavailable = (e: BlobEvent) => { if (e.data.size > 0) chunks.push(e.data); };
     rec.onstop = async () => {
       try {
         const blob = new Blob(chunks, { type: mimeType });
@@ -160,14 +134,14 @@ export default function InterviewPage() {
         fd.append("file", new File([blob], "interview.webm"));
         const r = await fetch("/api/upload", { method: "POST", body: fd });
         if (!r.ok) throw new Error("Upload failed");
-        const { url } = await r.json();
+        const { url } = (await r.json()) as { url: string };
         await fetch(`/api/interviews/${interviewId}`, {
           method: "PATCH",
           body: JSON.stringify({ videoUrl: url, endedAt: new Date().toISOString() }),
         });
         alert("Upload complete");
-      } catch (e: any) {
-        setErr(e?.message || "Upload/patch failed");
+      } catch (e: unknown) {
+        setErr((e as Error)?.message ?? "Upload/patch failed");
       }
     };
     rec.start(1000);
@@ -177,7 +151,7 @@ export default function InterviewPage() {
     setElapsed(0);
     setRecording(true);
 
-    // after permission granted, labels become available
+    // after permission, device labels populate
     refreshDevices();
   }
 
@@ -195,13 +169,21 @@ export default function InterviewPage() {
         <label>
           Camera:&nbsp;
           <select value={camId} onChange={(e) => setCamId(e.target.value)}>
-            {cams.map((c) => <option key={c.deviceId} value={c.deviceId}>{c.label || `Camera ${c.deviceId.slice(0,6)}`}</option>)}
+            {cams.map((c) => (
+              <option key={c.deviceId} value={c.deviceId}>
+                {c.label || `Camera ${c.deviceId.slice(0, 6)}`}
+              </option>
+            ))}
           </select>
         </label>
         <label>
           Mic:&nbsp;
           <select value={micId} onChange={(e) => setMicId(e.target.value)}>
-            {mics.map((m) => <option key={m.deviceId} value={m.deviceId}>{m.label || `Mic ${m.deviceId.slice(0,6)}`}</option>)}
+            {mics.map((m) => (
+              <option key={m.deviceId} value={m.deviceId}>
+                {m.label || `Mic ${m.deviceId.slice(0, 6)}`}
+              </option>
+            ))}
           </select>
         </label>
         <button onClick={refreshDevices}>Refresh devices</button>
@@ -224,8 +206,8 @@ export default function InterviewPage() {
       {err && <p style={{ color: "#ff6b6b", marginTop: 8 }}>{err}</p>}
 
       <p style={{ opacity: 0.7, marginTop: 8 }}>
-        If the video stays black: ensure Chrome site permissions are **Allow**, the correct camera is selected above,
-        and Windows 11 privacy toggles for Camera/Mic are **On**.
+        If the video stays black: ensure Chrome site permissions are <b>Allow</b>, the correct camera is selected above,
+        and Windows 11 privacy toggles for Camera/Mic are <b>On</b>.
       </p>
     </main>
   );

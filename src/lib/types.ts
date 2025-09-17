@@ -9,25 +9,25 @@ export type EventType =
   | "BOOK_DETECTED"
   | "EXTRA_DEVICE";
 
-/** What the client sends to the API */
+/** Client → API payload */
 export interface ProctorEventInput {
-  interviewId: string;        // string id from URL
-  t: number;                  // ms since start
+  interviewId: string;
+  t: number;                        // ms since start
   type: EventType;
   confidence?: number;
-  meta?: Record<string, any>;
-  createdAt?: string;         // optional ISO on client
+  meta?: Record<string, unknown>;
+  createdAt?: string;
 }
 
-/** What we store in MongoDB */
+/** Stored in Mongo */
 export interface ProctorEventDB {
-  _id?: ObjectId;             // Mongo will add this
-  interviewId: string;        // keep as string for simplicity
+  _id?: ObjectId;
+  interviewId: string;
   t: number;
   type: EventType;
   confidence?: number;
-  meta?: Record<string, any>;
-  createdAt: string;          // stored as ISO string
+  meta?: Record<string, unknown>;
+  createdAt: string;
 }
 
 export interface Interview {
