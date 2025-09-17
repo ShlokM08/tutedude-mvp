@@ -9,6 +9,10 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@mediapipe/tasks-vision": "^0.10.22-rc.20250304",
+    "@react-pdf/renderer": "^4.3.0",
+    "@tensorflow-models/coco-ssd": "^2.2.3",
+    "@tensorflow/tfjs": "^4.22.0",
     "@vercel/blob": "^2.0.0",
     "mongodb": "^6.19.0",
     "next": "15.5.3",
