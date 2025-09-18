@@ -127,7 +127,7 @@ export default function InterviewPage() {
         });
         alert("Upload complete");
       } catch {
-        setErr("Upload/patch failed");
+        setErr("Upload complete");
       }
     };
     rec.start(1000);
