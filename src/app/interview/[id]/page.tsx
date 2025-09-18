@@ -5,7 +5,8 @@ import type { EventType, ProctorEventInput } from "@/lib/types";
 import { useFaceFocus } from "@/lib/detect/useFaceFocus";
 import { useObjectDetect } from "@/lib/detect/useObjectDetect";
 
-/* ----- record helpers ----- */
+/** --- limits & helpers --- */
+const MAX_UPLOAD_BYTES = 4_000_000; // ~4MB guard to avoid Vercel 413
 const MIME_CANDIDATES = [
   "video/webm;codecs=vp9,opus",
   "video/webm;codecs=vp8,opus",
@@ -28,9 +29,8 @@ export default function InterviewPage() {
   const [recording, setRecording] = useState(false);
   const [elapsed, setElapsed] = useState(0);
 
-  // Visible message line for success/failure details
+  // Visible status about each step
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
-  // Keep last uploaded URL so we can retry attaching if needed
   const [uploadedVideoUrl, setUploadedVideoUrl] = useState<string | null>(null);
 
   // small event buffer
@@ -64,7 +64,6 @@ export default function InterviewPage() {
         });
         if (!resp.ok) throw new Error(`events POST ${resp.status}`);
       } catch {
-        // put them back to try again later
         bufferRef.current.unshift(...events);
       }
     }, 3000);
@@ -96,10 +95,17 @@ export default function InterviewPage() {
     setStatusMsg(null);
     setUploadedVideoUrl(null);
 
+    // Lower resolution to keep files small (360p-ish); keep audio on
     const constraints: MediaStreamConstraints = {
-      video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" },
+      video: {
+        width: { ideal: 640, max: 640 },
+        height: { ideal: 360, max: 360 },
+        frameRate: { ideal: 24, max: 24 },
+        facingMode: "user",
+      },
       audio: true,
     };
+
     let stream: MediaStream;
     try {
       stream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -118,7 +124,12 @@ export default function InterviewPage() {
       return;
     }
 
-    const rec = new MediaRecorder(stream, { mimeType });
+    // Reduce bitrate to keep size low (~300 kbps video + 48 kbps audio)
+    const rec = new MediaRecorder(stream, {
+      mimeType,
+      videoBitsPerSecond: 300_000,
+      audioBitsPerSecond: 48_000,
+    });
     const chunks: BlobPart[] = [];
 
     rec.ondataavailable = (e: BlobEvent) => {
@@ -126,13 +137,21 @@ export default function InterviewPage() {
     };
 
     rec.onstop = async () => {
-      setStatusMsg("Uploading…");
       try {
         const blob = new Blob(chunks, { type: mimeType });
+
+        // Guard against oversized uploads that would 413 on Vercel
+        if (blob.size > MAX_UPLOAD_BYTES) {
+          const mb = (blob.size / (1024 * 1024)).toFixed(2);
+          setStatusMsg(`❌ Recording too large (${mb} MB). Try a shorter duration or lower quality.`);
+          return;
+        }
+
+        setStatusMsg("Uploading…");
         const fd = new FormData();
         fd.append("file", new File([blob], "interview.webm"));
 
-        // 1) Upload
+        // 1) Upload to server (will still 413 if > limit; we guard above)
         const up = await fetch("/api/upload", { method: "POST", body: fd });
         if (!up.ok) {
           const t = await up.text().catch(() => "");
@@ -161,7 +180,7 @@ export default function InterviewPage() {
       }
     };
 
-    rec.start(1000);
+    rec.start(1000); // keep 1s timeslice for responsive stop
     mediaRecorderRef.current = rec;
     startTsRef.current = Date.now();
     setElapsed(0);
@@ -256,15 +275,12 @@ export default function InterviewPage() {
       </div>
 
       <div style={{ marginTop: 16, display: "flex", gap: 12, flexWrap: "wrap" }}>
-        {/* Open analysis page (contains CSV download) */}
         <a href={`/report/${interviewId}`} style={{ textDecoration: "none" }}>
           <button style={btn}>Open Report</button>
         </a>
-        {/* Direct CSV download */}
         <a href={`/api/reports/${interviewId}/csv`} style={{ textDecoration: "none" }}>
           <button style={btn}>Download CSV</button>
         </a>
-        {/* Retry attach appears only if upload succeeded but attach didn't */}
         {uploadedVideoUrl && statusMsg?.startsWith("⚠️") && (
           <button style={btn} onClick={retryAttach}>Retry Attach</button>
         )}
