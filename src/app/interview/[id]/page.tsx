@@ -27,7 +27,11 @@ export default function InterviewPage() {
 
   const [recording, setRecording] = useState(false);
   const [elapsed, setElapsed] = useState(0);
-  const [err, setErr] = useState<string | null>(null);
+
+  // Visible message line for success/failure details
+  const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  // Keep last uploaded URL so we can retry attaching if needed
+  const [uploadedVideoUrl, setUploadedVideoUrl] = useState<string | null>(null);
 
   // small event buffer
   const bufferRef = useRef<ProctorEventInput[]>([]);
@@ -53,12 +57,14 @@ export default function InterviewPage() {
       if (!bufferRef.current.length) return;
       const events = bufferRef.current.splice(0, bufferRef.current.length);
       try {
-        await fetch("/api/events", {
+        const resp = await fetch("/api/events", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ interviewId, events }),
         });
+        if (!resp.ok) throw new Error(`events POST ${resp.status}`);
       } catch {
+        // put them back to try again later
         bufferRef.current.unshift(...events);
       }
     }, 3000);
@@ -87,7 +93,9 @@ export default function InterviewPage() {
   }, [recording]);
 
   async function start() {
-    setErr(null);
+    setStatusMsg(null);
+    setUploadedVideoUrl(null);
+
     const constraints: MediaStreamConstraints = {
       video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" },
       audio: true,
@@ -96,42 +104,64 @@ export default function InterviewPage() {
     try {
       stream = await navigator.mediaDevices.getUserMedia(constraints);
     } catch {
-      setErr("Failed to access camera/mic. Check site permissions and Windows privacy toggles.");
+      setStatusMsg("❌ Failed to access camera/mic. Check site permissions and Windows privacy toggles.");
       return;
     }
 
     if (!videoRef.current) return;
     videoRef.current.srcObject = stream;
-    try { await videoRef.current.play(); } catch {}
+    try { await videoRef.current.play(); } catch {/* ignore */ }
 
     const mimeType = pickSupportedMime();
     if (!mimeType) {
-      setErr("MediaRecorder WebM not supported. Use latest Chrome/Edge.");
+      setStatusMsg("❌ MediaRecorder WebM not supported. Use latest Chrome/Edge.");
       return;
     }
 
     const rec = new MediaRecorder(stream, { mimeType });
     const chunks: BlobPart[] = [];
-    rec.ondataavailable = (e: BlobEvent) => { if (e.data.size > 0) chunks.push(e.data); };
+
+    rec.ondataavailable = (e: BlobEvent) => {
+      if (e.data.size > 0) chunks.push(e.data);
+    };
+
     rec.onstop = async () => {
+      setStatusMsg("Uploading…");
       try {
         const blob = new Blob(chunks, { type: mimeType });
         const fd = new FormData();
         fd.append("file", new File([blob], "interview.webm"));
-        const r = await fetch("/api/upload", { method: "POST", body: fd });
-        if (!r.ok) throw new Error("Upload failed");
-        const { url } = (await r.json()) as { url: string };
-        await fetch(`/api/interviews/${interviewId}`, {
+
+        // 1) Upload
+        const up = await fetch("/api/upload", { method: "POST", body: fd });
+        if (!up.ok) {
+          const t = await up.text().catch(() => "");
+          setStatusMsg(`❌ Upload failed (${up.status}) ${t}`);
+          return;
+        }
+        const { url } = (await up.json()) as { url: string };
+        setUploadedVideoUrl(url);
+
+        // 2) Attach to interview
+        const patch = await fetch(`/api/interviews/${interviewId}`, {
           method: "PATCH",
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ videoUrl: url, endedAt: new Date().toISOString() }),
         });
-        alert("Upload complete");
-      } catch {
-        setErr("Upload complete");
+        if (!patch.ok) {
+          const t = await patch.text().catch(() => "");
+          setStatusMsg(`⚠️ Upload ok, attach failed (${patch.status}) ${t}`);
+          return;
+        }
+
+        setStatusMsg("✅ Upload complete and attached to the interview.");
+      } catch (e) {
+        const msg = (e as Error).message || "Unexpected error during upload/attach";
+        setStatusMsg(`❌ ${msg}`);
       }
     };
-    rec.start(1000);
 
+    rec.start(1000);
     mediaRecorderRef.current = rec;
     startTsRef.current = Date.now();
     setElapsed(0);
@@ -142,6 +172,27 @@ export default function InterviewPage() {
     mediaRecorderRef.current?.stop();
     (videoRef.current?.srcObject as MediaStream | null)?.getTracks().forEach((t) => t.stop());
     setRecording(false);
+  }
+
+  async function retryAttach() {
+    if (!uploadedVideoUrl) return;
+    setStatusMsg("Retrying attach…");
+    try {
+      const r = await fetch(`/api/interviews/${interviewId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ videoUrl: uploadedVideoUrl, endedAt: new Date().toISOString() }),
+      });
+      if (!r.ok) {
+        const t = await r.text().catch(() => "");
+        setStatusMsg(`❌ Attach failed (${r.status}) ${t}`);
+        return;
+      }
+      setStatusMsg("✅ Attached successfully.");
+    } catch (e) {
+      const msg = (e as Error).message || "Attach failed";
+      setStatusMsg(`❌ ${msg}`);
+    }
   }
 
   // styles
@@ -213,9 +264,17 @@ export default function InterviewPage() {
         <a href={`/api/reports/${interviewId}/csv`} style={{ textDecoration: "none" }}>
           <button style={btn}>Download CSV</button>
         </a>
+        {/* Retry attach appears only if upload succeeded but attach didn't */}
+        {uploadedVideoUrl && statusMsg?.startsWith("⚠️") && (
+          <button style={btn} onClick={retryAttach}>Retry Attach</button>
+        )}
       </div>
 
-      {err && <p style={{ color: "#ff6b6b", marginTop: 12 }}>{err}</p>}
+      {statusMsg && (
+        <div style={{ marginTop: 12, padding: "10px 12px", border: "1px solid #444", borderRadius: 8 }}>
+          {statusMsg}
+        </div>
+      )}
     </main>
   );
 }
