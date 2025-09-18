@@ -1,171 +1,170 @@
+// src/lib/detect/useFaceFocus.ts
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import {
-  FaceLandmarker,
-  FilesetResolver,
-  type NormalizedLandmark,
-} from "@mediapipe/tasks-vision";
+import type { EventType } from "@/lib/types";
 
-export type FocusStatus = "focused" | "away" | "no-face";
-
-type Opts = {
+type Args = {
   video: HTMLVideoElement | null;
   canvas: HTMLCanvasElement | null;
-  onEvent?: (type: "NO_FACE_10S" | "FOCUS_LOST_5S" | "MULTIPLE_FACES", meta?: Record<string, unknown>) => void;
-  // tuning
-  maxFps?: number;                 // face check fps
-  noFaceMs?: number;               // time before NO_FACE_10S
-  awayMs?: number;                 // time before FOCUS_LOST_5S
-  multiFacesCooldownMs?: number;   // debounce for MULTIPLE_FACES
+  onEvent?: (type: EventType, meta?: Record<string, unknown>) => void;
 };
+type Status = "idle" | "focused" | "away" | "alert";
 
-const MODEL_URL =
-  "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
 const WASM_BASE =
-  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm";
+  process.env.NEXT_PUBLIC_MEDIAPIPE_WASM ??
+  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm";
 
-export function useFaceFocus({
-  video,
-  canvas,
-  onEvent,
-  maxFps = 24,
-  noFaceMs = 10_000,
-  awayMs = 5_000,
-  multiFacesCooldownMs = 10_000,
-}: Opts) {
-  const [status, setStatus] = useState<FocusStatus>("no-face");
+const MODEL_LOCAL = process.env.NEXT_PUBLIC_FACE_MODEL_URL ?? "/models/face_landmarker.task";
+const MODEL_CDN =
+  "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
+
+export function useFaceFocus({ video, canvas, onEvent }: Args) {
+  const [status, setStatus] = useState<Status>("idle");
   const [faces, setFaces] = useState(0);
 
-  const landmarkerRef = useRef<FaceLandmarker | null>(null);
+  const lmRef = useRef<any | null>(null);
   const rafRef = useRef<number | null>(null);
-  const lastTickRef = useRef(0);
-
-  // timers
-  const noFaceStartRef = useRef<number | null>(null);
-  const awayStartRef = useRef<number | null>(null);
-  const lastMultiFaceAtRef = useRef(0);
-
-  // helpers
-  function bboxOf(pts: NormalizedLandmark[]) {
-    let minX = 1, minY = 1, maxX = 0, maxY = 0;
-    for (const p of pts) {
-      if (p.x < minX) minX = p.x;
-      if (p.y < minY) minY = p.y;
-      if (p.x > maxX) maxX = p.x;
-      if (p.y > maxY) maxY = p.y;
-    }
-    return { minX, minY, maxX, maxY };
-  }
-
-  function drawBox(ctx: CanvasRenderingContext2D, w: number, h: number, b: { minX: number, minY: number, maxX: number, maxY: number }) {
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = "#21d07a";
-    ctx.strokeRect(b.minX * w, b.minY * h, (b.maxX - b.minX) * w, (b.maxY - b.minY) * h);
-  }
+  const lastDimsRef = useRef<{ w: number; h: number } | null>(null);
+  const lastStatusRef = useRef<Status>("idle");
 
   useEffect(() => {
     let cancelled = false;
 
-    async function load() {
-      if (!video || !canvas) return;
-      const fileset = await FilesetResolver.forVisionTasks(WASM_BASE);
-      const lm = await FaceLandmarker.createFromOptions(fileset, {
-        baseOptions: { modelAssetPath: MODEL_URL },
-        runningMode: "VIDEO",
-        numFaces: 2,
-        outputFaceBlendshapes: true, // so we can infer yaw/pitch from blendshapes
-      });
-      if (cancelled) return;
-      landmarkerRef.current = lm;
+    if (!video || !canvas) return;
 
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return;
+    (async () => {
+      try {
+        const vision = await import("@mediapipe/tasks-vision");
+        const { FaceLandmarker, FilesetResolver } = vision;
 
-      const loop = () => {
-        const v = video;
-        const lm = landmarkerRef.current;
-        if (!v || !lm) return;
+        const fileset = await FilesetResolver.forVisionTasks(WASM_BASE);
 
-        const now = performance.now();
-        if (now - lastTickRef.current < 1000 / maxFps) {
-          rafRef.current = requestAnimationFrame(loop);
-          return;
-        }
-        lastTickRef.current = now;
-
-        // keep canvas sized
-        if (canvas.width !== v.videoWidth || canvas.height !== v.videoHeight) {
-          canvas.width = v.videoWidth || 640;
-          canvas.height = v.videoHeight || 480;
-        }
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-        const res = lm.detectForVideo(v, now);
-        const n = res?.faceLandmarks?.length ?? 0;
-        setFaces(n);
-
-        // draw simple boxes
-        if (n > 0 && res?.faceLandmarks) {
-          for (const face of res.faceLandmarks) {
-            drawBox(ctx, canvas.width, canvas.height, bboxOf(face));
+        async function createWithFallback() {
+          try {
+            return await FaceLandmarker.createFromOptions(fileset, {
+              baseOptions: { modelAssetPath: MODEL_LOCAL },
+              runningMode: "VIDEO",
+              numFaces: 2,
+              minFaceDetectionConfidence: 0.5,
+              minFacePresenceConfidence: 0.5,
+              minTrackingConfidence: 0.5,
+            });
+          } catch {
+            console.warn("[useFaceFocus] Local model missing, using CDN");
+            return await FaceLandmarker.createFromOptions(fileset, {
+              baseOptions: { modelAssetPath: MODEL_CDN },
+              runningMode: "VIDEO",
+              numFaces: 2,
+              minFaceDetectionConfidence: 0.5,
+              minFacePresenceConfidence: 0.5,
+              minTrackingConfidence: 0.5,
+            });
           }
         }
 
-        // logic
-        if (n === 0) {
-          if (noFaceStartRef.current == null) noFaceStartRef.current = now;
-          if (now - (noFaceStartRef.current ?? now) >= noFaceMs) {
-            setStatus("no-face");
-            if (onEvent) onEvent("NO_FACE_10S");
-            noFaceStartRef.current = now + 60_000; // avoid spamming: fire roughly once/min while empty
+        const lm = await createWithFallback();
+
+        // If the effect got cancelled during async init, just bail.
+        // DO NOT call lm.close() here; some builds throw on immediate close.
+        if (cancelled) return;
+
+        lmRef.current = lm;
+
+        const loop = () => {
+          if (cancelled) return;
+
+          const v = video;
+          const c = canvas;
+          const model = lmRef.current;
+
+          if (!v || !c || !model) {
+            rafRef.current = requestAnimationFrame(loop);
+            return;
           }
-          awayStartRef.current = null;
-        } else {
-          noFaceStartRef.current = null;
 
-          // MULTIPLE_FACES
-          if (n >= 2 && now - lastMultiFaceAtRef.current > multiFacesCooldownMs) {
-            if (onEvent) onEvent("MULTIPLE_FACES", { faces: n });
-            lastMultiFaceAtRef.current = now;
+          if (
+            v.readyState < HTMLMediaElement.HAVE_CURRENT_DATA ||
+            v.paused ||
+            v.ended ||
+            v.videoWidth === 0 ||
+            v.videoHeight === 0
+          ) {
+            rafRef.current = requestAnimationFrame(loop);
+            return;
           }
 
-          // "away" using blendshapes yaw/pitch (if available)
-          // media pipe categories like "headYawLeft"/"headYawRight"/"headPitchUp"/"headPitchDown"
-          const shapes = res?.faceBlendshapes?.[0]?.categories ?? [];
-          const byName = new Map(shapes.map(c => [c.categoryName, c.score]));
-          const yaw = Math.max(byName.get("headYawLeft") ?? 0, byName.get("headYawRight") ?? 0);
-          const pitch = Math.max(byName.get("headPitchUp") ?? 0, byName.get("headPitchDown") ?? 0);
-          const lookingAway = (yaw > 0.35) || (pitch > 0.35); // thresholds ~0..1
+          const w = v.videoWidth;
+          const h = v.videoHeight;
+          const dims = lastDimsRef.current;
+          if (!dims || dims.w !== w || dims.h !== h) {
+            c.width = w;
+            c.height = h;
+            lastDimsRef.current = { w, h };
+          }
 
-          if (lookingAway) {
-            if (awayStartRef.current == null) awayStartRef.current = now;
-            if (now - (awayStartRef.current ?? now) >= awayMs) {
-              setStatus("away");
-              if (onEvent) onEvent("FOCUS_LOST_5S", { yaw, pitch });
-              awayStartRef.current = now + 60_000; // rate limit
+          let result: any | undefined;
+          try {
+            result = model.detectForVideo(v, performance.now());
+          } catch {
+            rafRef.current = requestAnimationFrame(loop);
+            return;
+          }
+
+          const n = result?.faceLandmarks?.length ?? 0;
+          setFaces(n);
+
+          const newStatus: Status = n === 0 ? "away" : n === 1 ? "focused" : "alert";
+          if (newStatus !== lastStatusRef.current) {
+            setStatus(newStatus);
+            lastStatusRef.current = newStatus;
+            if (onEvent) {
+              const meta = { faces: n };
+              if (newStatus === "away") onEvent("NO_FACE_10S" as EventType, meta);
+              else if (newStatus === "alert") onEvent("MULTIPLE_FACES" as EventType, meta);
             }
-          } else {
-            awayStartRef.current = null;
-            setStatus("focused");
           }
-        }
+
+          const ctx = c.getContext("2d");
+          if (ctx) {
+            ctx.clearRect(0, 0, c.width, c.height);
+            ctx.strokeStyle = "rgba(255,255,255,0.6)";
+            ctx.lineWidth = 2;
+
+            const landmarks = result?.faceLandmarks ?? [];
+            for (const lm of landmarks) {
+              const nose = lm[1];
+              if (nose) {
+                const x = nose.x * c.width;
+                const y = nose.y * c.height;
+                ctx.beginPath();
+                ctx.moveTo(x - 6, y);
+                ctx.lineTo(x + 6, y);
+                ctx.moveTo(x, y - 6);
+                ctx.lineTo(x, y + 6);
+                ctx.stroke();
+              }
+            }
+          }
+
+          rafRef.current = requestAnimationFrame(loop);
+        };
 
         rafRef.current = requestAnimationFrame(loop);
-      };
-
-      rafRef.current = requestAnimationFrame(loop);
-    }
-
-    load();
+      } catch (e) {
+        console.error("[useFaceFocus] init failed:", e);
+      }
+    })();
 
     return () => {
       cancelled = true;
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
-      landmarkerRef.current?.close();
-      landmarkerRef.current = null;
+      try {
+        lmRef.current?.close?.();
+      } catch { /* ignore */ }
+      lmRef.current = null;
     };
-  }, [video, canvas, maxFps, noFaceMs, awayMs, multiFacesCooldownMs, onEvent]);
+  }, [video, canvas, onEvent]);
 
   return { status, faces };
 }

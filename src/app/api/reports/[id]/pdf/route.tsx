@@ -1,25 +1,27 @@
-// src/app/api/reports/[id]/pdf/route.tsx
-import { NextResponse, type NextRequest } from "next/server";
-import { getDb } from "@/lib/mongo";
-import { ObjectId } from "mongodb";
-import {
-  summarizeCounts,
-  computeIntegrity,
-  fetchEventsByInterview,
-  estimateDurationMs,
-  type EventRow,
-} from "@/lib/report";
-import {
-  Document as PDFDocument,
-  Page,
-  Text,
-  View,
-  StyleSheet,
-  pdf,
-} from "@react-pdf/renderer";
+"use client";
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
+import { useEffect, useState } from "react";
+import { useParams } from "next/navigation";
+
+/** API shape from /api/reports/[id] */
+type EventRow = { t: number; type: string; confidence?: number };
+type BreakdownRow = { type: string; times: number; deduct: number };
+type Summary = {
+  interview: {
+    _id: string;
+    candidateName?: string | null;
+    startedAt?: string | null;
+    endedAt?: string | null;
+    videoUrl?: string | null;
+    integrityScore: number;
+    durationMs: number;
+  };
+  counts: Record<string, number>;
+  integrity: { score: number; breakdown: BreakdownRow[] };
+  phoneDetected: boolean;
+  multipleFaces: boolean;
+  eventSample?: EventRow[];
+};
 
 function msToHMS(ms: number) {
   const s = Math.max(0, Math.round(ms / 1000));
@@ -31,153 +33,247 @@ function msToHMS(ms: number) {
   return `${ss}s`;
 }
 
-const styles = StyleSheet.create({
-  page: { padding: 24, fontSize: 11, color: "#111" },
-  h1: { fontSize: 18, marginBottom: 6, fontWeight: 700 },
-  meta: { marginBottom: 10 },
-  row: { flexDirection: "row", justifyContent: "space-between", marginBottom: 2 },
-  pillRow: { flexDirection: "row", gap: 8, marginTop: 6, marginBottom: 6 },
-  pillOk: { padding: 4, borderRadius: 8, backgroundColor: "#e8f6ef" },
-  pillBad: { padding: 4, borderRadius: 8, backgroundColor: "#fde8ea" },
-  scoreWrap: { marginTop: 6, marginBottom: 8, flexDirection: "row", alignItems: "center", gap: 10 },
-  scoreBig: { fontSize: 28, fontWeight: 700 },
-  table: { marginTop: 8, borderTopWidth: 1, borderColor: "#ddd" },
-  tr: { flexDirection: "row", borderBottomWidth: 1, borderColor: "#eee" },
-  th: { flex: 1, fontWeight: 700, paddingVertical: 4 },
-  td: { flex: 1, paddingVertical: 4 },
-  mono: { fontFamily: "Helvetica" },
-  timeline: { marginTop: 8 },
-});
+export default function ReportPage() {
+  const { id } = useParams<{ id: string }>();
+  const [data, setData] = useState<Summary | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
 
-export async function GET(
-  _req: NextRequest,
-  ctx: { params: Promise<{ id: string }> }
-) {
-  const { id } = await ctx.params;
-  const db = await getDb();
+  // 🔽 New: blob URL for reliable inline preview
+  const [pdfBlobUrl, setPdfBlobUrl] = useState<string | null>(null);
 
-  const interview = await db
-    .collection("interviews")
-    .findOne({ _id: new ObjectId(id) });
+  // fetch JSON summary
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const r = await fetch(`/api/reports/${id}`, { cache: "no-store" });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const j = (await r.json()) as Summary;
+        if (alive) setData(j);
+      } catch (e) {
+        if (alive) setError((e as Error).message);
+      } finally {
+        if (alive) setLoading(false);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [id]);
 
-  if (!interview) {
-    return NextResponse.json({ error: "not found" }, { status: 404 });
-  }
+  // fetch PDF as Blob and create a blob: URL for the <iframe>
+  useEffect(() => {
+    if (!data) return;
+    let revoked = false;
+    (async () => {
+      try {
+        const r = await fetch(`/api/reports/${id}/pdf`, { cache: "no-store" });
+        if (!r.ok) throw new Error(`PDF HTTP ${r.status}`);
+        const blob = await r.blob();
+        const url = URL.createObjectURL(blob);
+        if (!revoked) setPdfBlobUrl(url);
+      } catch {
+        setPdfBlobUrl(null);
+      }
+    })();
+    return () => {
+      revoked = true;
+      if (pdfBlobUrl) URL.revokeObjectURL(pdfBlobUrl);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, data]);
 
-  const events: EventRow[] = await fetchEventsByInterview(db, id);
-  const counts = summarizeCounts(events);
-  const integrity = computeIntegrity(counts);
-  const durationMs = estimateDurationMs(
-    interview.startedAt as string | undefined,
-    interview.endedAt as string | undefined,
-    events
+  const openUrl = `/api/reports/${id}/pdf`;
+  const downloadUrl = `/api/reports/${id}/pdf?download=1`;
+
+  const btn: React.CSSProperties = {
+    background: "#222",
+    border: "1px solid #555",
+    color: "#fff",
+    padding: "8px 12px",
+    borderRadius: 8,
+    cursor: "pointer",
+  };
+
+  return (
+    <main style={{ padding: 24, color: "#fff", background: "#000", minHeight: "100vh" }}>
+      <h1 style={{ fontSize: 22, marginBottom: 8 }}>Interview Integrity Report</h1>
+
+      {loading && <p style={{ opacity: 0.85 }}>Loading…</p>}
+      {error && <p style={{ color: "#ff6b6b" }}>Error: {error}</p>}
+
+      {!loading && !error && data && (
+        <>
+          {/* Meta */}
+          <div style={{ display: "grid", gap: 6, marginBottom: 12, opacity: 0.95 }}>
+            <div>
+              Interview: <code>{data.interview?._id ?? String(id)}</code>
+            </div>
+            {data.interview?.candidateName && <div>Candidate: {data.interview.candidateName}</div>}
+            {data.interview?.startedAt && <div>Started: {data.interview.startedAt}</div>}
+            {data.interview?.endedAt && <div>Ended: {data.interview.endedAt}</div>}
+            <div>Duration: {msToHMS(data.interview?.durationMs ?? 0)}</div>
+
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 6 }}>
+              <a href={openUrl} target="_blank" rel="noreferrer" style={{ textDecoration: "none" }}>
+                <button style={btn}>Open PDF</button>
+              </a>
+              <a href={downloadUrl} style={{ textDecoration: "none" }} download>
+                <button style={btn}>Download PDF</button>
+              </a>
+              <a href={`/interview/${id}`} style={{ textDecoration: "none" }}>
+                <button style={btn}>Back to Interview</button>
+              </a>
+            </div>
+          </div>
+
+          {/* Score + Flags */}
+          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
+            <div style={{ fontSize: 14, opacity: 0.85 }}>Final Score</div>
+            <div style={{ fontSize: 28, fontWeight: 700 }}>{data.integrity?.score ?? 0}</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <div
+                style={{
+                  padding: "4px 8px",
+                  borderRadius: 999,
+                  background: data.phoneDetected ? "#3d142a" : "#143d2a",
+                  color: data.phoneDetected ? "#ff6b6b" : "#21d07a",
+                }}
+              >
+                Phone shown: {data.phoneDetected ? "Yes" : "No"}
+              </div>
+              <div
+                style={{
+                  padding: "4px 8px",
+                  borderRadius: 999,
+                  background: data.multipleFaces ? "#3d142a" : "#143d2a",
+                  color: data.multipleFaces ? "#ff6b6b" : "#21d07a",
+                }}
+              >
+                Multiple faces: {data.multipleFaces ? "Yes" : "No"}
+              </div>
+            </div>
+          </div>
+
+          {/* Deductions */}
+          {Array.isArray(data.integrity?.breakdown) && data.integrity.breakdown.length > 0 && (
+            <div style={{ marginBottom: 16 }}>
+              <div style={{ fontWeight: 700, marginBottom: 6 }}>Deductions</div>
+              <div style={{ borderTop: "1px solid #333" }}>
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "1fr 1fr 1fr",
+                    padding: "6px 0",
+                    opacity: 0.8,
+                  }}
+                >
+                  <div style={{ fontWeight: 700 }}>Type</div>
+                  <div style={{ fontWeight: 700 }}>Count</div>
+                  <div style={{ fontWeight: 700 }}>Deduction</div>
+                </div>
+                {data.integrity.breakdown.map((b, i) => (
+                  <div
+                    key={i}
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "1fr 1fr 1fr",
+                      padding: "6px 0",
+                      borderTop: "1px dashed #333",
+                    }}
+                  >
+                    <div>{b.type}</div>
+                    <div>{b.times}</div>
+                    <div>-{b.deduct}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Counts */}
+          {data.counts && Object.keys(data.counts).length > 0 && (
+            <div style={{ marginBottom: 16 }}>
+              <div style={{ fontWeight: 700, marginBottom: 6 }}>Event Counts</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, maxWidth: 560 }}>
+                {Object.entries(data.counts).map(([k, v]) => (
+                  <div
+                    key={k}
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      borderBottom: "1px dashed #333",
+                      paddingBottom: 4,
+                    }}
+                  >
+                    <span style={{ opacity: 0.85 }}>{k}</span>
+                    <span>{v}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Timeline */}
+          <div style={{ marginTop: 8 }}>
+            <div style={{ fontWeight: 700, marginBottom: 4 }}>Timeline (first 50)</div>
+            <div style={{ fontSize: 12, opacity: 0.8, marginBottom: 6 }}>t = seconds since start</div>
+            <ul style={{ listStyle: "none", paddingLeft: 0, margin: 0, maxWidth: 720 }}>
+              {(data.eventSample ?? []).slice(0, 50).map((e, i) => (
+                <li key={i} style={{ borderTop: "1px dashed #333", padding: "6px 0" }}>
+                  <span style={{ width: 64, display: "inline-block", opacity: 0.8 }}>
+                    {(e.t / 1000).toFixed(1)}s
+                  </span>
+                  <span style={{ fontWeight: 600 }}>{e.type}</span>
+                  {typeof e.confidence === "number" && (
+                    <span style={{ opacity: 0.7 }}> • conf {e.confidence.toFixed(2)}</span>
+                  )}
+                </li>
+              ))}
+              {(data.eventSample ?? []).length === 0 && (
+                <li style={{ opacity: 0.8 }}>No events captured.</li>
+              )}
+            </ul>
+          </div>
+
+          {/* PDF Preview via Blob URL */}
+          <div style={{ marginTop: 16 }}>
+            <div style={{ fontWeight: 700, marginBottom: 6 }}>PDF Preview</div>
+
+            {pdfBlobUrl ? (
+              <iframe
+                src={pdfBlobUrl}
+                title="report-pdf-preview"
+                width="100%"
+                height={700}
+                style={{ border: "1px solid #333", background: "#111" }}
+              />
+            ) : (
+              <div
+                style={{
+                  border: "1px solid #333",
+                  background: "#111",
+                  color: "#ccc",
+                  padding: 12,
+                }}
+              >
+                Couldn’t inline the PDF.{" "}
+                <a href={openUrl} target="_blank" rel="noreferrer" style={{ color: "#61dafb" }}>
+                  Open in a new tab
+                </a>{" "}
+                or{" "}
+                <a href={downloadUrl} style={{ color: "#61dafb" }}>
+                  download it
+                </a>
+                .
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </main>
   );
-
-  await db
-    .collection("interviews")
-    .updateOne(
-      { _id: new ObjectId(id) },
-      { $set: { integrityScore: integrity.score } }
-    );
-
-  const phoneDetected = (counts["PHONE_DETECTED"] ?? 0) > 0;
-  const multipleFaces = (counts["MULTIPLE_FACES"] ?? 0) > 0;
-
-  const Doc = (
-    <PDFDocument>
-      <Page size="A4" style={styles.page}>
-        <Text style={styles.h1}>Interview Integrity Report</Text>
-
-        <View style={styles.meta}>
-          <View style={styles.row}>
-            <Text>Interview ID</Text>
-            <Text style={styles.mono}>{id}</Text>
-          </View>
-          {interview.candidateName && (
-            <View style={styles.row}>
-              <Text>Candidate</Text>
-              <Text>{String(interview.candidateName)}</Text>
-            </View>
-          )}
-          {interview.startedAt && (
-            <View style={styles.row}>
-              <Text>Started</Text>
-              <Text>{String(interview.startedAt)}</Text>
-            </View>
-          )}
-          {interview.endedAt && (
-            <View style={styles.row}>
-              <Text>Ended</Text>
-              <Text>{String(interview.endedAt)}</Text>
-            </View>
-          )}
-          <View style={styles.row}>
-            <Text>Duration</Text>
-            <Text>{msToHMS(durationMs)}</Text>
-          </View>
-        </View>
-
-        <View style={styles.scoreWrap}>
-          <Text>Final score:</Text>
-          <Text style={styles.scoreBig}>{integrity.score}</Text>
-        </View>
-
-        <View style={styles.pillRow}>
-          <View style={phoneDetected ? styles.pillBad : styles.pillOk}>
-            <Text>Phone shown: {phoneDetected ? "Yes" : "No"}</Text>
-          </View>
-          <View style={multipleFaces ? styles.pillBad : styles.pillOk}>
-            <Text>Multiple faces: {multipleFaces ? "Yes" : "No"}</Text>
-          </View>
-        </View>
-
-        <View style={styles.table}>
-          <View style={styles.tr}>
-            <Text style={styles.th}>Type</Text>
-            <Text style={styles.th}>Count</Text>
-            <Text style={styles.th}>Deduction</Text>
-          </View>
-          {integrity.breakdown.map((b) => (
-            <View key={b.type} style={styles.tr}>
-              <Text style={styles.td}>{b.type}</Text>
-              <Text style={styles.td}>{b.times}</Text>
-              <Text style={styles.td}>-{b.deduct}</Text>
-            </View>
-          ))}
-        </View>
-
-        <View style={styles.timeline}>
-          <Text style={{ fontWeight: 700, marginBottom: 4 }}>
-            Timeline (first 50)
-          </Text>
-          {events.slice(0, 50).map((e, i) => (
-            <View key={i} style={styles.row}>
-              <Text style={styles.mono}>{(e.t / 1000).toFixed(1)}s</Text>
-              <Text>{e.type}</Text>
-              <Text>
-                {typeof e.confidence === "number"
-                  ? `conf ${e.confidence.toFixed(2)}`
-                  : ""}
-              </Text>
-            </View>
-          ))}
-        </View>
-      </Page>
-    </PDFDocument>
-  );
-
-  // Get raw bytes from react-pdf. In Node this resolves to a Buffer,
-  // which is a Uint8Array subclass. We copy into a fresh Uint8Array
-  // so its .buffer is an ArrayBuffer (not ArrayBufferLike), then return that.
-  const raw = (await pdf(Doc).toBuffer()) as unknown as Uint8Array;
-  const u8 = new Uint8Array(raw);         // ensure offset 0 / ArrayBuffer type
-  const ab: ArrayBuffer = u8.buffer;      // clean ArrayBuffer for BodyInit
-
-  return new NextResponse(ab, {
-    headers: {
-      "Content-Type": "application/pdf",
-      "Content-Disposition": `inline; filename="report-${id}.pdf"`,
-      "Cache-Control": "no-store",
-    },
-  });
 }
