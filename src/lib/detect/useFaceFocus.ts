@@ -1,168 +1,126 @@
-// src/lib/detect/useFaceFocus.ts
-"use client";
-
 import { useEffect, useRef, useState } from "react";
 import type { EventType } from "@/lib/types";
+import {
+  FaceLandmarker,
+  FilesetResolver,
+  type FaceLandmarkerResult,
+} from "@mediapipe/tasks-vision";
 
-type Args = {
+type Props = {
   video: HTMLVideoElement | null;
   canvas: HTMLCanvasElement | null;
-  onEvent?: (type: EventType, meta?: Record<string, unknown>) => void;
+  onEvent?: (t: EventType, meta?: Record<string, unknown>) => void;
 };
-type Status = "idle" | "focused" | "away" | "alert";
 
-const WASM_BASE =
-  process.env.NEXT_PUBLIC_MEDIAPIPE_WASM ??
-  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm";
+type Status = "idle" | "focused" | "away";
 
-const MODEL_LOCAL = process.env.NEXT_PUBLIC_FACE_MODEL_URL ?? "/models/face_landmarker.task";
-const MODEL_CDN =
-  "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
-
-export function useFaceFocus({ video, canvas, onEvent }: Args) {
+/**
+ * Lightweight face/focus detector using MediaPipe Tasks Vision (WebAssembly).
+ * Returns a status + number of faces and draws overlays on the provided canvas.
+ */
+export function useFaceFocus({ video, canvas, onEvent }: Props) {
+  const landmarkerRef = useRef<FaceLandmarker | null>(null);
   const [status, setStatus] = useState<Status>("idle");
   const [faces, setFaces] = useState(0);
-
-  const lmRef = useRef<any | null>(null);
-  const rafRef = useRef<number | null>(null);
-  const lastDimsRef = useRef<{ w: number; h: number } | null>(null);
-  const lastStatusRef = useRef<Status>("idle");
 
   useEffect(() => {
     let cancelled = false;
 
-    if (!video || !canvas) return;
+    async function createWithFallback(): Promise<FaceLandmarker> {
+      // Try local .task first, then CDN
+      const fileset = await FilesetResolver.forVisionTasks(
+        // This can be any base URL; using the official CDN keeps it robust
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm"
+      );
+
+      try {
+        return await FaceLandmarker.createFromOptions(fileset, {
+          baseOptions: { modelAssetPath: "/models/face_landmarker.task" },
+          runningMode: "VIDEO",
+          numFaces: 2,
+        });
+      } catch {
+        // Fallback to CDN model
+        return await FaceLandmarker.createFromOptions(fileset, {
+          baseOptions: {
+            modelAssetPath:
+              "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+          },
+          runningMode: "VIDEO",
+          numFaces: 2,
+        });
+      }
+    }
 
     (async () => {
-      try {
-        const vision = await import("@mediapipe/tasks-vision");
-        const { FaceLandmarker, FilesetResolver } = vision;
+      if (!video || !canvas) return;
 
-        const fileset = await FilesetResolver.forVisionTasks(WASM_BASE);
+      const lm = await createWithFallback();
+      if (cancelled) {
+        // ensure cleanup if effect already unmounted
+        try {
+          lm.close();
+        } catch {
+          /* ignore */
+        }
+        return;
+      }
+      landmarkerRef.current = lm;
 
-        async function createWithFallback() {
-          try {
-            return await FaceLandmarker.createFromOptions(fileset, {
-              baseOptions: { modelAssetPath: MODEL_LOCAL },
-              runningMode: "VIDEO",
-              numFaces: 2,
-              minFaceDetectionConfidence: 0.5,
-              minFacePresenceConfidence: 0.5,
-              minTrackingConfidence: 0.5,
-            });
-          } catch {
-            console.warn("[useFaceFocus] Local model missing, using CDN");
-            return await FaceLandmarker.createFromOptions(fileset, {
-              baseOptions: { modelAssetPath: MODEL_CDN },
-              runningMode: "VIDEO",
-              numFaces: 2,
-              minFaceDetectionConfidence: 0.5,
-              minFacePresenceConfidence: 0.5,
-              minTrackingConfidence: 0.5,
-            });
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+
+      const loop = () => {
+        if (cancelled || !video || !canvas || !landmarkerRef.current) return;
+
+        const now = performance.now();
+        let res: FaceLandmarkerResult | undefined;
+
+        try {
+          res = landmarkerRef.current.detectForVideo(video, now);
+        } catch {
+          // If detect fails once (e.g., before metadata ready), skip this frame
+          requestAnimationFrame(loop);
+          return;
+        }
+
+        const n = res?.faceLandmarks?.length ?? 0;
+        setFaces(n);
+
+        // simple status: face present => focused; if not, idle/away
+        setStatus(n > 0 ? "focused" : "idle");
+
+        // clear & draw basic overlay (optional)
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        if (n > 0 && res?.faceLandmarks) {
+          ctx.strokeStyle = "rgba(97,218,251,0.9)";
+          ctx.lineWidth = 2;
+          for (const lmks of res.faceLandmarks) {
+            // draw a tiny box around nose tip-ish if available
+            const p = lmks[1];
+            if (p) {
+              const x = p.x * canvas.width;
+              const y = p.y * canvas.height;
+              ctx.strokeRect(x - 8, y - 8, 16, 16);
+            }
           }
         }
 
-        const lm = await createWithFallback();
+        requestAnimationFrame(loop);
+      };
 
-        // If the effect got cancelled during async init, just bail.
-        // DO NOT call lm.close() here; some builds throw on immediate close.
-        if (cancelled) return;
-
-        lmRef.current = lm;
-
-        const loop = () => {
-          if (cancelled) return;
-
-          const v = video;
-          const c = canvas;
-          const model = lmRef.current;
-
-          if (!v || !c || !model) {
-            rafRef.current = requestAnimationFrame(loop);
-            return;
-          }
-
-          if (
-            v.readyState < HTMLMediaElement.HAVE_CURRENT_DATA ||
-            v.paused ||
-            v.ended ||
-            v.videoWidth === 0 ||
-            v.videoHeight === 0
-          ) {
-            rafRef.current = requestAnimationFrame(loop);
-            return;
-          }
-
-          const w = v.videoWidth;
-          const h = v.videoHeight;
-          const dims = lastDimsRef.current;
-          if (!dims || dims.w !== w || dims.h !== h) {
-            c.width = w;
-            c.height = h;
-            lastDimsRef.current = { w, h };
-          }
-
-          let result: any | undefined;
-          try {
-            result = model.detectForVideo(v, performance.now());
-          } catch {
-            rafRef.current = requestAnimationFrame(loop);
-            return;
-          }
-
-          const n = result?.faceLandmarks?.length ?? 0;
-          setFaces(n);
-
-          const newStatus: Status = n === 0 ? "away" : n === 1 ? "focused" : "alert";
-          if (newStatus !== lastStatusRef.current) {
-            setStatus(newStatus);
-            lastStatusRef.current = newStatus;
-            if (onEvent) {
-              const meta = { faces: n };
-              if (newStatus === "away") onEvent("NO_FACE_10S" as EventType, meta);
-              else if (newStatus === "alert") onEvent("MULTIPLE_FACES" as EventType, meta);
-            }
-          }
-
-          const ctx = c.getContext("2d");
-          if (ctx) {
-            ctx.clearRect(0, 0, c.width, c.height);
-            ctx.strokeStyle = "rgba(255,255,255,0.6)";
-            ctx.lineWidth = 2;
-
-            const landmarks = result?.faceLandmarks ?? [];
-            for (const lm of landmarks) {
-              const nose = lm[1];
-              if (nose) {
-                const x = nose.x * c.width;
-                const y = nose.y * c.height;
-                ctx.beginPath();
-                ctx.moveTo(x - 6, y);
-                ctx.lineTo(x + 6, y);
-                ctx.moveTo(x, y - 6);
-                ctx.lineTo(x, y + 6);
-                ctx.stroke();
-              }
-            }
-          }
-
-          rafRef.current = requestAnimationFrame(loop);
-        };
-
-        rafRef.current = requestAnimationFrame(loop);
-      } catch (e) {
-        console.error("[useFaceFocus] init failed:", e);
-      }
+      requestAnimationFrame(loop);
     })();
 
     return () => {
       cancelled = true;
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      const lm = landmarkerRef.current;
+      landmarkerRef.current = null;
       try {
-        lmRef.current?.close?.();
-      } catch { /* ignore */ }
-      lmRef.current = null;
+        lm?.close();
+      } catch {
+        /* ignore */
+      }
     };
   }, [video, canvas, onEvent]);
 
