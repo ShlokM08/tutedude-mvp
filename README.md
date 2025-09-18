@@ -120,10 +120,10 @@ Project Structure (key)
 
 # Deployment Notes
 
-## Deploy on Vercel. Use MongoDB Atlas for MONGODB_URI.
+## Deployment Link
 
-Video uploads: prefer direct-to-storage (Vercel Blob / S3). Large bodies to API routes can 413.
-Keep MediaRecorder bitrate modest (e.g., 300 kbps video / 48 kbps audio) for small files.
+Demo: https://drive.google.com/file/d/1lHTXfzQ4TG8ZrBJZxgQ3DWbeVfYzLL3k/view?usp=sharing
+Website Link: https://tutedude-mvp.vercel.app/
 
 ### If using Vercel Blob, connect the integration (dashboard) or set BLOB_READ_WRITE_TOKEN for local dev.
 
