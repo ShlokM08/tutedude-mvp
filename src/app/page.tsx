@@ -2,6 +2,8 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import Image from "next/image";
+
 
 export default function HomePage() {
   const router = useRouter();
@@ -110,11 +112,12 @@ export default function HomePage() {
       <section style={card}>
         {/* Logo + wordmark */}
         <div style={logoWrap}>
-          <img
-  src="/tutedude_logo.png"   // <-- corrected
+          <Image
+  src="/tutedude_logo.png"
   alt="TuteDude logo"
   width={42}
   height={42}
+  priority
   style={{
     borderRadius: 8,
     background:

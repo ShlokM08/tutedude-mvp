@@ -1,4 +1,5 @@
 "use client";
+
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import type { EventType, ProctorEventInput } from "@/lib/types";
@@ -18,6 +19,12 @@ function pickSupportedMime(): string | undefined {
   return undefined;
 }
 
+type Notice =
+  | { type: "info"; text: string }
+  | { type: "success"; text: string }
+  | { type: "error"; text: string }
+  | null;
+
 export default function InterviewPage() {
   const { id: interviewId } = useParams<{ id: string }>();
 
@@ -29,11 +36,13 @@ export default function InterviewPage() {
   const [recording, setRecording] = useState(false);
   const [elapsed, setElapsed] = useState(0);
 
-  // Visible status about each step
-  const [statusMsg, setStatusMsg] = useState<string | null>(null);
-  const [uploadedVideoUrl, setUploadedVideoUrl] = useState<string | null>(null);
+  // 👇 new: only show Report/CSV after "Stop" was pressed at least once
+  const [hasStopped, setHasStopped] = useState(false);
 
-  // small event buffer
+  // small toast notice
+  const [notice, setNotice] = useState<Notice>(null);
+
+  // event buffer
   const bufferRef = useRef<ProctorEventInput[]>([]);
   const pushEvent = useCallback(
     (type: EventType, confidence?: number, meta?: Record<string, unknown>) => {
@@ -70,21 +79,19 @@ export default function InterviewPage() {
     return () => clearInterval(iv);
   }, [interviewId]);
 
-  // Face/focus detector
+  // detectors
   const { status, faces } = useFaceFocus({
     video: videoRef.current,
     canvas: canvasRef.current,
     onEvent: (t, meta) => pushEvent(t, 1.0, meta),
   });
-
-  // Object detector (draws on same canvas layer)
   useObjectDetect({
     video: videoRef.current,
     canvas: canvasRef.current,
     onEvent: (t, meta) => pushEvent(t, 0.9, meta),
   });
 
-  // elapsed timer while recording
+  // elapsed timer
   useEffect(() => {
     let t: ReturnType<typeof setInterval> | undefined;
     if (recording) t = setInterval(() => setElapsed((p) => p + 1), 1000);
@@ -92,10 +99,10 @@ export default function InterviewPage() {
   }, [recording]);
 
   async function start() {
-    setStatusMsg(null);
-    setUploadedVideoUrl(null);
+    setNotice(null);
+    setHasStopped(false); // hide actions again if user restarts
 
-    // Lower resolution to keep files small (360p-ish); keep audio on
+    // keep file small
     const constraints: MediaStreamConstraints = {
       video: {
         width: { ideal: 640, max: 640 },
@@ -110,7 +117,7 @@ export default function InterviewPage() {
     try {
       stream = await navigator.mediaDevices.getUserMedia(constraints);
     } catch {
-      setStatusMsg("❌ Failed to access camera/mic. Check site permissions and Windows privacy toggles.");
+      setNotice({ type: "error", text: "Failed to access camera/mic. Check permissions." });
       return;
     }
 
@@ -120,48 +127,41 @@ export default function InterviewPage() {
 
     const mimeType = pickSupportedMime();
     if (!mimeType) {
-      setStatusMsg("❌ MediaRecorder WebM not supported. Use latest Chrome/Edge.");
+      setNotice({ type: "error", text: "MediaRecorder WebM not supported. Use latest Chrome/Edge." });
       return;
     }
 
-    // Reduce bitrate to keep size low (~300 kbps video + 48 kbps audio)
     const rec = new MediaRecorder(stream, {
       mimeType,
       videoBitsPerSecond: 300_000,
       audioBitsPerSecond: 48_000,
     });
     const chunks: BlobPart[] = [];
-
-    rec.ondataavailable = (e: BlobEvent) => {
-      if (e.data.size > 0) chunks.push(e.data);
-    };
+    rec.ondataavailable = (e: BlobEvent) => { if (e.data.size > 0) chunks.push(e.data); };
 
     rec.onstop = async () => {
       try {
         const blob = new Blob(chunks, { type: mimeType });
-
-        // Guard against oversized uploads that would 413 on Vercel
         if (blob.size > MAX_UPLOAD_BYTES) {
           const mb = (blob.size / (1024 * 1024)).toFixed(2);
-          setStatusMsg(`❌ Recording too large (${mb} MB). Try a shorter duration or lower quality.`);
+          setNotice({ type: "error", text: `Recording too large (${mb} MB). Try shorter duration.` });
           return;
         }
 
-        setStatusMsg("Uploading…");
+        setNotice({ type: "info", text: "Uploading…" });
         const fd = new FormData();
         fd.append("file", new File([blob], "interview.webm"));
 
-        // 1) Upload to server (will still 413 if > limit; we guard above)
+        // upload
         const up = await fetch("/api/upload", { method: "POST", body: fd });
         if (!up.ok) {
           const t = await up.text().catch(() => "");
-          setStatusMsg(`❌ Upload failed (${up.status}) ${t}`);
+          setNotice({ type: "error", text: `Upload failed (${up.status}) ${t}` });
           return;
         }
         const { url } = (await up.json()) as { url: string };
-        setUploadedVideoUrl(url);
 
-        // 2) Attach to interview
+        // attach to interview
         const patch = await fetch(`/api/interviews/${interviewId}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
@@ -169,18 +169,17 @@ export default function InterviewPage() {
         });
         if (!patch.ok) {
           const t = await patch.text().catch(() => "");
-          setStatusMsg(`⚠️ Upload ok, attach failed (${patch.status}) ${t}`);
+          setNotice({ type: "error", text: `Upload ok, attach failed (${patch.status}) ${t}` });
           return;
         }
 
-        setStatusMsg("✅ Upload complete and attached to the interview.");
+        setNotice({ type: "success", text: "Upload complete and attached to the interview." });
       } catch (e) {
-        const msg = (e as Error).message || "Unexpected error during upload/attach";
-        setStatusMsg(`❌ ${msg}`);
+        setNotice({ type: "error", text: (e as Error).message || "Unexpected upload/attach error" });
       }
     };
 
-    rec.start(1000); // keep 1s timeslice for responsive stop
+    rec.start(1000);
     mediaRecorderRef.current = rec;
     startTsRef.current = Date.now();
     setElapsed(0);
@@ -191,106 +190,209 @@ export default function InterviewPage() {
     mediaRecorderRef.current?.stop();
     (videoRef.current?.srcObject as MediaStream | null)?.getTracks().forEach((t) => t.stop());
     setRecording(false);
+    setHasStopped(true); // 👈 now we can reveal Report/CSV
   }
 
-  async function retryAttach() {
-    if (!uploadedVideoUrl) return;
-    setStatusMsg("Retrying attach…");
-    try {
-      const r = await fetch(`/api/interviews/${interviewId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ videoUrl: uploadedVideoUrl, endedAt: new Date().toISOString() }),
-      });
-      if (!r.ok) {
-        const t = await r.text().catch(() => "");
-        setStatusMsg(`❌ Attach failed (${r.status}) ${t}`);
-        return;
-      }
-      setStatusMsg("✅ Attached successfully.");
-    } catch (e) {
-      const msg = (e as Error).message || "Attach failed";
-      setStatusMsg(`❌ ${msg}`);
-    }
-  }
+  /** ------------------- styling ------------------- */
+  const outer: React.CSSProperties = {
+    minHeight: "100vh",
+    background:
+      "radial-gradient(1200px 600px at 70% -10%, rgba(129,61,255,0.18), transparent), #000",
+    display: "grid",
+    placeItems: "center",
+    padding: "24px",
+    color: "#fff",
+  };
 
-  // styles
+  const card: React.CSSProperties = {
+    width: "100%",
+    maxWidth: 960,
+    borderRadius: 16,
+    border: "1px solid #262626",
+    background: "linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.02))",
+    boxShadow: "0 10px 40px rgba(0,0,0,0.4)",
+    padding: "24px",
+    backdropFilter: "blur(6px)",
+    position: "relative",
+    overflow: "hidden",
+  };
+
+  const headerRow: React.CSSProperties = {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 14,
+    gap: 12,
+  };
+
   const btn: React.CSSProperties = {
-    background: "#222",
-    border: "1px solid #555",
+    background: "#1b1b1e",
+    border: "1px solid #3a3a3f",
     color: "#fff",
     padding: "10px 16px",
     borderRadius: 10,
     cursor: "pointer",
   };
 
-  return (
-    <main style={{ padding: 24, color: "#eee", background: "#000", minHeight: "100vh" }}>
-      <h1>Interview: {String(interviewId)}</h1>
+  const chip: React.CSSProperties = {
+    padding: "6px 12px",
+    borderRadius: 999,
+    fontSize: 12,
+  };
 
-      <div style={{ position: "relative", width: "100%", maxWidth: 720 }}>
-        <video
-          ref={videoRef}
-          playsInline
-          muted
-          style={{ width: "100%", background: "#000", borderRadius: 12, display: "block" }}
-        />
-        <canvas
-          ref={canvasRef}
+  // neat toast
+  const toastBase: React.CSSProperties = {
+    position: "absolute",
+    left: 16,
+    bottom: 16,
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    padding: "10px 12px",
+    borderRadius: 10,
+    border: "1px solid transparent",
+    fontSize: 14,
+    boxShadow: "0 8px 24px rgba(0,0,0,0.35)",
+  };
+  const toastStyle =
+    notice?.type === "success"
+      ? { ...toastBase, background: "#0b2a1a", borderColor: "#174d31", color: "#d7ffe7" }
+      : notice?.type === "error"
+      ? { ...toastBase, background: "#2a0b0b", borderColor: "#4d1717", color: "#ffd7d7" }
+      : { ...toastBase, background: "#0e1116", borderColor: "#262b36", color: "#e6eefc" };
+
+  return (
+    <main style={outer}>
+      <section style={card}>
+        {/* header with status chip */}
+        <div style={headerRow}>
+          <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700 }}>Interview</h1>
+          <div
+            style={{
+              ...chip,
+              background: status === "focused" ? "#143d2a" : status === "away" ? "#3d2a14" : "#3d142a",
+              color: status === "focused" ? "#21d07a" : status === "away" ? "#f6ad55" : "#ff6b6b",
+            }}
+          >
+            {status} • {faces} face(s)
+          </div>
+        </div>
+
+        {/* video */}
+        <div style={{ position: "relative", width: "100%", borderRadius: 12, overflow: "hidden", border: "1px solid #2c2c2c", background: "#000" }}>
+          <video ref={videoRef} playsInline muted style={{ width: "100%", display: "block" }} />
+          <canvas
+            ref={canvasRef}
+            style={{
+              position: "absolute",
+              inset: 0,
+              pointerEvents: "none",
+            }}
+          />
+        </div>
+
+        {/* primary controls row */}
+        <div style={{ marginTop: 14, display: "flex", alignItems: "center", gap: 12 }}>
+          {!recording ? (
+            <button style={btn} onClick={start}>Start</button>
+          ) : (
+            <button style={btn} onClick={stop}>Stop</button>
+          )}
+          <span style={{ color: "#cfcfcf" }}>Elapsed: {elapsed}s</span>
+        </div>
+
+        {/* secondary actions — only after Stop */}
+        {hasStopped && (
+          <div style={{ marginTop: 14, display: "flex", gap: 12, flexWrap: "wrap" }}>
+            <a href={`/report/${interviewId}`} style={{ textDecoration: "none" }}>
+              <button style={btn}>Open Report</button>
+            </a>
+            <a href={`/api/reports/${interviewId}/csv`} style={{ textDecoration: "none" }}>
+              <button style={btn}>Download CSV</button>
+            </a>
+          </div>
+        )}
+
+        {/* neat toast */}
+        {notice && (
+          <div style={toastStyle}>
+            <span
+              aria-hidden
+              style={{ fontWeight: 700 }}
+            >
+              {notice.type === "success" ? "✓" : notice.type === "error" ? "!" : "•"}
+            </span>
+            <span>{notice.text}</span>
+            <button
+              onClick={() => setNotice(null)}
+              style={{
+                marginLeft: 8,
+                background: "transparent",
+                border: "none",
+                color: "inherit",
+                cursor: "pointer",
+                opacity: 0.9,
+              }}
+              aria-label="Dismiss"
+              title="Dismiss"
+            >
+              ×
+            </button>
+          </div>
+        )}
+      </section>
+
+      {/* bottom-right helper — single line */}
+      <aside
+        style={{
+          position: "fixed",
+          right: 14,
+          bottom: 14,
+          background: "#0f0f10",
+          border: "1px solid #2c2c2c",
+          color: "#cfcfcf",
+          borderRadius: 12,
+          padding: "10px 12px",
+          boxShadow: "0 8px 28px rgba(0,0,0,0.45)",
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          whiteSpace: "nowrap",
+        }}
+      >
+        <span>Issues during the session? Mail <strong>help</strong> with ID:</span>
+        <code
           style={{
-            position: "absolute",
-            inset: 0,
-            borderRadius: 12,
-            pointerEvents: "none",
-          }}
-        />
-        <div
-          style={{
-            position: "absolute",
-            top: 8,
-            right: 8,
-            padding: "4px 10px",
-            borderRadius: 999,
-            fontSize: 12,
-            background:
-              status === "focused" ? "#143d2a" : status === "away" ? "#3d2a14" : "#3d142a",
-            color: status === "focused" ? "#21d07a" : status === "away" ? "#f6ad55" : "#ff6b6b",
+            background: "#141415",
+            padding: "2px 6px",
+            borderRadius: 6,
+            border: "1px solid #2c2c2c",
+            color: "#eaeaea",
           }}
         >
-          {status} • {faces} face(s)
-        </div>
-      </div>
-
-      <div style={{ marginTop: 12, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-        {!recording ? <button style={btn} onClick={start}>Start</button> : <button style={btn} onClick={stop}>Stop</button>}
-        <span style={{ minWidth: 120 }}>Elapsed: {elapsed}s</span>
-
-        {/* simulators for quick testing */}
-        <button style={btn} onClick={() => pushEvent("PHONE_DETECTED", 0.9, { note: "simulated" })}>
-          Simulate Phone
+          {String(interviewId)}
+        </code>
+        <button
+          onClick={async () => {
+            try {
+              await navigator.clipboard.writeText(String(interviewId));
+              setNotice({ type: "success", text: "Interview ID copied to clipboard." });
+            } catch {
+              setNotice({ type: "error", text: "Could not copy Interview ID." });
+            }
+          }}
+          style={{
+            background: "#1b1b1e",
+            border: "1px solid #3a3a3f",
+            color: "#fff",
+            padding: "6px 10px",
+            borderRadius: 8,
+            cursor: "pointer",
+          }}
+        >
+          Copy
         </button>
-        <button style={btn} onClick={() => pushEvent("NO_FACE_10S", 1.0, { note: "simulated" })}>
-          Simulate No Face
-        </button>
-      </div>
-
-      <div style={{ marginTop: 16, display: "flex", gap: 12, flexWrap: "wrap" }}>
-        <a href={`/report/${interviewId}`} style={{ textDecoration: "none" }}>
-          <button style={btn}>Open Report</button>
-        </a>
-        <a href={`/api/reports/${interviewId}/csv`} style={{ textDecoration: "none" }}>
-          <button style={btn}>Download CSV</button>
-        </a>
-        {uploadedVideoUrl && statusMsg?.startsWith("⚠️") && (
-          <button style={btn} onClick={retryAttach}>Retry Attach</button>
-        )}
-      </div>
-
-      {statusMsg && (
-        <div style={{ marginTop: 12, padding: "10px 12px", border: "1px solid #444", borderRadius: 8 }}>
-          {statusMsg}
-        </div>
-      )}
+      </aside>
     </main>
   );
 }
