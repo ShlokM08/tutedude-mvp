@@ -1,36 +1,56 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# TuteDude – Proctored Interview (Focus & Object Detection)
 
-## Getting Started
+Minimal Next.js + TypeScript app that records a webcam interview, detects focus loss & objects (phone, etc.) on-device, logs events to MongoDB, and generates a Proctoring Report (JSON + CSV).
 
-First, run the development server:
+Video files are stored in Vercel Blob (URL saved in MongoDB as videoUrl).
+Events & interviews are stored in MongoDB.
 
-```bash
+Stack
+
+Next.js (App Router), TypeScript
+
+MediaRecorder (WebM) for recording
+
+MediaPipe Face Landmarker (focus / no-face / optional multi-face)
+
+TensorFlow.js COCO-SSD (phone / notes / devices)
+
+MongoDB Atlas (interviews + events)
+
+Vercel (hosting) + Vercel Blob (video storage)
+
+# Quickstart
+## 1) Install
+npm i
+or: pnpm i
+
+## 2) Environment
+
+Create .env.local:
+
+MONGODB_URI=mongodb+srv://<user>:<pass>@<cluster>/<db>?retryWrites=true&w=majority
+
+Use a Blob write token from vercel too
+
+## 3) Model file
+
+Download MediaPipe Face Landmarker .task file and place it at:
+
+public/models/face_landmarker.task
+
+## 4) Run
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+ open http://localhost:3000
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Deployment Link
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Demo: https://drive.google.com/file/d/1lHTXfzQ4TG8ZrBJZxgQ3DWbeVfYzLL3k/view?usp=sharing
+Website Link: https://tutedude-mvp.vercel.app/
 
-## Learn More
+### If using Vercel Blob, connect the integration (dashboard) or set BLOB_READ_WRITE_TOKEN for local dev.
 
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Scripts
+npm run dev      # start dev server
+npm run build    # build
+npm start        # run production build
