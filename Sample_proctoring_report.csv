@@ -1,0 +1,22 @@
+﻿Section,Field,Value
+Meta,Interview ID,68cc833eb894ee1ab37bd2cb
+Meta,Candidate,use_1
+Meta,Started At,2025-09-18T22:10:06.316Z
+Meta,Ended At,2025-09-18T22:10:28.217Z
+Meta,Duration,22s
+
+Score,Final Score,70
+Flags,Phone shown,Yes
+Flags,Multiple faces,No
+
+Deductions,Type,Times,Deduction
+Deductions,PHONE_DETECTED,4,-30
+
+Event Counts,Type,Count
+Event Counts,PHONE_DETECTED,4
+
+Timeline (first 200),t (ms),type,confidence
+Timeline,10194,PHONE_DETECTED,0.9
+Timeline,11712,PHONE_DETECTED,0.9
+Timeline,13691,PHONE_DETECTED,0.9
+Timeline,15199,PHONE_DETECTED,0.9

@@ -15,6 +15,11 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "TuteDude",
   description: "Welcome to the future of Learning",
+  icons: {
+    icon: [{ url: "/tutedude_logo.png", type: "image/png" }],
+    shortcut: "/tutedude_logo.png",
+    apple: [{ url: "/tutedude_logo.png" }],
+  },
 };
 
 export default function RootLayout({
@@ -24,9 +29,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
-      >
+      <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
         {children}
       </body>
     </html>
